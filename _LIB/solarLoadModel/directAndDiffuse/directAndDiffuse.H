@@ -137,6 +137,18 @@ class directAndDiffuse
         //- Pivot Indices for LU decomposition
         labelList pivotIndices_;
 
+        //- Local view factor rows (sparse), used by the parallel Jacobi solver
+        scalarListList FmyProc_;
+
+        //- Global column indices for each local view factor row
+        labelListList globalFaceFacesLocal_;
+
+        //- Maximum Jacobi iterations
+        label maxJacobiIter_;
+
+        //- Jacobi convergence tolerance
+        scalar jacobiTol_;
+
     // Private Member Functions
 
         //- Initialise

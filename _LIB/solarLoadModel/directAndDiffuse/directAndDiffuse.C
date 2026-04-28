@@ -239,6 +239,10 @@ void Foam::solarLoad::directAndDiffuse::initialise()
         )
     ); 
 
+    // Store local view factor data for the parallel Jacobi solver (before gatherList)
+    FmyProc_ = FmyProc;
+    globalFaceFacesLocal_ = globalFaceFaces;
+
     List<labelList> sunskyMap(Pstream::nProcs());
     sunskyMap[Pstream::myProcNo()] = sunskyMapmyProc;
     Pstream::gatherList(sunskyMap);
@@ -335,68 +339,31 @@ void Foam::solarLoad::directAndDiffuse::initialise()
         );          
     }
 
-    if (Pstream::master())
+    // Apply optional view factor row normalization (smoothing) locally on each
+    // proc. Equivalent to global row normalization (scale = 1/rowSum) but avoids
+    // allocating the O(N^2) global Fmatrix_ (which would require ~135 GB for
+    // N=130k). Each proc normalises only its own rows independently.
+    constAlbedo_ = readBool(coeffs_.lookup("constantAlbedo"));
+    bool smoothing = readBool(coeffs_.lookup("smoothing"));
+    if (smoothing)
     {
-        Fmatrix_.reset
-        (
-            new scalarSquareMatrix(totalNCoarseFaces_, 0.0)
-        );    
-
-        Info<< "Insert elements in the matrix..." << endl;
-
-        for (label procI = 0; procI < Pstream::nProcs(); procI++)
+        Info<< "Smoothing the view factor rows (local normalization)..." << endl;
+        forAll(FmyProc_, localI)
         {
-            insertMatrixElements
-            (
-                globalNumbering,
-                procI,
-                globalFaceFacesProc[procI],
-                F[procI],
-                Fmatrix_()
-            );
-        }
-
-        bool smoothing = readBool(coeffs_.lookup("smoothing"));
-        if (smoothing)
-        {
-            Info<< "Smoothing the matrix..." << endl;
-
-            for (label i=0; i<totalNCoarseFaces_; i++)
+            scalar rowSum = 0.0;
+            forAll(FmyProc_[localI], k)
+                rowSum += FmyProc_[localI][k];
+            if (rowSum > SMALL)
             {
-                scalar sumF = 0.0;
-                for (label j=0; j<totalNCoarseFaces_; j++)
-                {
-                    sumF += Fmatrix_()(i, j);
-                }
-                scalar delta = sumF - 1.0;
-                for (label j=0; j<totalNCoarseFaces_; j++)
-                {
-                    Fmatrix_()(i, j) *= (1.0 - delta/sumF);
-                }
+                forAll(FmyProc_[localI], k)
+                    FmyProc_[localI][k] /= rowSum;
             }
         }
-
     }
 
-    // constAlbedo_ and CLU_ only needed on master (matrix is N×N, too large to
-    // broadcast). Workers receive only q (size N) after the master solves.
-    constAlbedo_ = readBool(coeffs_.lookup("constantAlbedo"));
-    if (Pstream::master())
-    {
-        if (constAlbedo_)
-        {
-            CLU_.reset
-            (
-                new scalarSquareMatrix
-                (
-                    totalNCoarseFaces_,
-                    0.0
-                )
-            );
-
-            pivotIndices_.setSize(totalNCoarseFaces_);
-        }
-    }
+    // Read Jacobi solver parameters (fall back to defaults if absent)
+    maxJacobiIter_ = coeffs_.lookupOrDefault<label>("maxJacobiIter", 200);
+    jacobiTol_     = coeffs_.lookupOrDefault<scalar>("jacobiTol", scalar(1.0e-6));
 }
 
 
@@ -458,7 +425,11 @@ Foam::solarLoad::directAndDiffuse::directAndDiffuse(const volScalarField& T)
     constAlbedo_(false),
     timestepsInADay_(24),
     iterCounter_(0),
-    pivotIndices_(0)
+    pivotIndices_(0),
+    FmyProc_(),
+    globalFaceFacesLocal_(),
+    maxJacobiIter_(200),
+    jacobiTol_(1.0e-6)
 {
     initialise();
 }
@@ -524,7 +495,11 @@ Foam::solarLoad::directAndDiffuse::directAndDiffuse
     constAlbedo_(false),
     timestepsInADay_(24),
     iterCounter_(0),
-    pivotIndices_(0)
+    pivotIndices_(0),
+    FmyProc_(),
+    globalFaceFacesLocal_(),
+    maxJacobiIter_(200),
+    jacobiTol_(1.0e-6)
 {
     initialise();
 }
@@ -721,9 +696,6 @@ void Foam::solarLoad::directAndDiffuse::calculate()
     Pstream::listCombineScatter(A);
     Pstream::listCombineScatter(qsExt);
 
-    // Net solarLoad
-    scalarField q(totalNCoarseFaces_, 0.0);
-    
     Time& time = const_cast<Time&>(mesh_.time());   
     // Read sunPosVector list
     dictionary sunPosVectorIO;
@@ -763,117 +735,95 @@ void Foam::solarLoad::directAndDiffuse::calculate()
     }  
 
     // -------------------------------------------------------------------------
-    // Variable Albedo path (untested): master-only since Fmatrix_ lives only
-    // on master. O(N) RHS: q[i] = Isol[i] - sum(qsExt).
+    // Parallel Jacobi solver for: C*q = b
+    //   C(i,j) = delta_ij/(1-A_j) - (A_j/(1-A_j))*F(i,j)
+    //   b(i)   = Isol(i) - sum(qsExt)   [derived by expanding the original
+    //            O(N^2) loop: diagonal adds Isol[i]-qsExt[i], each off-diagonal
+    //            adds -qsExt[j], total = Isol[i] - sum_j(qsExt[j])]
+    //
+    // Each proc owns a contiguous chunk [globalStart, globalStart+nLocal).
+    // FmyProc_[localI] / globalFaceFacesLocal_[localI] hold the sparse row.
+    // After each Jacobi step, q_new is allGathered so all procs hold the full
+    // solution vector q for the next iteration's SpMV.
     // -------------------------------------------------------------------------
-    if (!constAlbedo_) //this is not tested - aytac
-    {
-        if (Pstream::master())
-        {
-            scalarSquareMatrix C(totalNCoarseFaces_, 0.0);
-            const scalar sumQsExt = sum(qsExt);
-            for (label i=0; i<totalNCoarseFaces_; i++)
-            {
-                scalar Isol =   skyViewCoeffGlobal_()[lo][i]
-                              + sunViewCoeffGlobal_()[lo][i];
-                q[i] = Isol - sumQsExt;
-                for (label j=0; j<totalNCoarseFaces_; j++)
-                {
-                    if (i==j)
-                        C(i, j) = (1/(1-A[j]))-(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                    else
-                        C(i, j) = -(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                }
-            }
-            Info<< "\nSolving view factor equations..." << endl;
-            LUsolve(C, q);
-        }
-        // Broadcast q from master to all procs
-        Pstream::scatter(q);
-    }
-    else //Constant albedo
-    {
-        // -----------------------------------------------------------------------
-        // Iteration 0: build CLU_ on master, save to disk, then broadcast to all
-        // procs so every rank holds a valid LU decomposition for replicated solve.
-        // -----------------------------------------------------------------------
-        if (iterCounter_ == 0)
-        {
-            if (Pstream::master())
-            {
-                for (label i=0; i<totalNCoarseFaces_; i++)
-                {
-                    for (label j=0; j<totalNCoarseFaces_; j++)
-                    {
-                        if (i==j)
-                            CLU_()(i, j) = (1/(1-A[j]))-(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                        else
-                            CLU_()(i, j) = -(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                    }
-                }
+    const label myProc = Pstream::myProcNo();
+    const label globalStart = globalNumbering.toGlobal(myProc, 0);
+    const scalar sumQsExt = sum(qsExt);
 
-                fileName fileCLU
-                (
-                   mesh_.time().rootPath()
-                   /mesh_.time().globalCaseName()
-                   /"processor0/CLU_qs"
-                );
-                IFstream is(fileCLU);
-                label testCLU = -1;
-                if (is.good())
+    // --- Assemble local RHS (b) and diagonal C ---
+    scalarField b_local(nLocalCoarseFaces_, 0.0);
+    scalarField Cdiag_local(nLocalCoarseFaces_, 0.0);
+    for (label localI = 0; localI < nLocalCoarseFaces_; localI++)
+    {
+        const label globalI = globalStart + localI;
+
+        // Interpolated solar irradiance for this face and timestep
+        scalar Isol =   skyViewCoeffGlobal_()[lo][globalI]*(1 - hi_fraction)
+                      + skyViewCoeffGlobal_()[hi][globalI]*hi_fraction
+                      + sunViewCoeffGlobal_()[lo][globalI]*(1 - hi_fraction)
+                      + sunViewCoeffGlobal_()[hi][globalI]*hi_fraction;
+        b_local[localI] = Isol - sumQsExt;
+
+        // Diagonal of C: 1/(1-A_i) - A_i/(1-A_i)*F(i,i)
+        // F(i,i) is 0 for convex/flat surfaces; search just in case.
+        scalar Fdiag = 0.0;
+        const labelList& cols = globalFaceFacesLocal_[localI];
+        forAll(cols, k)
+        {
+            if (cols[k] == globalI) { Fdiag = FmyProc_[localI][k]; break; }
+        }
+        const scalar oneMinusAi = max(1.0 - A[globalI], VSMALL);
+        Cdiag_local[localI] = 1.0/oneMinusAi - (A[globalI]/oneMinusAi)*Fdiag;
+    }
+
+    // --- Jacobi iteration ---
+    scalarField q(totalNCoarseFaces_, 0.0);
+    scalarField q_new(totalNCoarseFaces_, 0.0);
+
+    scalar residual = GREAT;
+    label iter = 0;
+    while (iter < maxJacobiIter_ && residual > jacobiTol_)
+    {
+        // Each proc updates its own chunk of q_new; other entries stay 0.
+        for (label localI = 0; localI < nLocalCoarseFaces_; localI++)
+        {
+            const label globalI = globalStart + localI;
+            scalar rhs = b_local[localI];
+            const labelList& cols = globalFaceFacesLocal_[localI];
+            const scalarList& Frow = FmyProc_[localI];
+            forAll(cols, k)
+            {
+                const label globalJ = cols[k];
+                if (globalJ != globalI)
                 {
-                    is >> testCLU;
-                    if (testCLU == totalNCoarseFaces_)
-                    {
-                        is >> CLU_() >> pivotIndices_;
-                        Info << "Read decomposed C matrix from existing file!" << endl;
-                    }
-                    else
-                    {
-                        testCLU = -1;
-                        Info << "Warning: File for decomposed C matrix does not match "
-                             << "totalNCoarseFaces! Will decompose C matrix again..."
-                             << endl;
-                    }
-                }
-                if (testCLU == -1)
-                {
-                    Info<< "\nDecomposing C matrix..." << endl;
-                    LUDecompose(CLU_(), pivotIndices_);
-                    if (Pstream::nProcs() > 1)
-                    {
-                        OFstream os(fileCLU);
-                        os << totalNCoarseFaces_ << endl;
-                        os << CLU_() << endl;
-                        os << pivotIndices_ << endl;
-                    }
+                    const scalar oneMinusAj = max(1.0 - A[globalJ], VSMALL);
+                    rhs += (A[globalJ]/oneMinusAj) * Frow[k] * q[globalJ];
                 }
             }
-            iterCounter_++;
+            q_new[globalI] = rhs / Cdiag_local[localI];
         }
 
-        // -----------------------------------------------------------------------
-        // Master: O(N) RHS assembly + LU backsubstitution. Then scatter q.
-        // Derivation: the original O(N^2) loop simplifies to
-        //   q[i] = Isol[i] - sum(qsExt)  for all i
-        // -----------------------------------------------------------------------
-        if (Pstream::master())
+        // AllGather: each proc contributed only its chunk; sum = allgather
+        Pstream::listCombineGather(q_new, sumOp<scalar>());
+        Pstream::listCombineScatter(q_new);
+
+        // Convergence check on local chunk (max absolute change)
+        scalar localRes = 0.0;
+        for (label localI = 0; localI < nLocalCoarseFaces_; localI++)
         {
-            const scalar sumQsExt = sum(qsExt);
-            for (label i=0; i<totalNCoarseFaces_; i++)
-            {
-                scalar Isol =   skyViewCoeffGlobal_()[lo][i]*(1 - hi_fraction)
-                              + skyViewCoeffGlobal_()[hi][i]*hi_fraction
-                              + sunViewCoeffGlobal_()[lo][i]*(1 - hi_fraction)
-                              + sunViewCoeffGlobal_()[hi][i]*hi_fraction;
-                q[i] = Isol - sumQsExt;
-            }
-            Info<< "\nLU Back substitute C matrix.." << endl;
-            LUBacksubstitute(CLU_(), pivotIndices_, q);
+            localRes = max(localRes, mag(q_new[globalStart + localI]
+                                       - q[globalStart + localI]));
         }
-        // Broadcast q (size N) from master to all workers.
-        Pstream::scatter(q);
+        reduce(localRes, maxOp<scalar>());
+        residual = localRes;
+
+        Swap(q, q_new);
+        q_new = scalar(0.0);
+        iter++;
     }
+
+    Info<< "\nJacobi solver: " << iter << " iterations, residual = "
+        << residual << endl;
 
     
 
