@@ -376,7 +376,13 @@ void Foam::solarLoad::directAndDiffuse::initialise()
             }
         }
 
-        constAlbedo_ = readBool(coeffs_.lookup("constantAlbedo"));
+    }
+
+    // constAlbedo_ and CLU_ only needed on master (matrix is N×N, too large to
+    // broadcast). Workers receive only q (size N) after the master solves.
+    constAlbedo_ = readBool(coeffs_.lookup("constantAlbedo"));
+    if (Pstream::master())
+    {
         if (constAlbedo_)
         {
             CLU_.reset
@@ -388,9 +394,8 @@ void Foam::solarLoad::directAndDiffuse::initialise()
                 )
             );
 
-            pivotIndices_.setSize(CLU_().m());
+            pivotIndices_.setSize(totalNCoarseFaces_);
         }
-    
     }
 }
 
@@ -757,65 +762,62 @@ void Foam::solarLoad::directAndDiffuse::calculate()
         hi_fraction = (time.value() - sunPosVector_x[lo]) / (sunPosVector_x[hi] - sunPosVector_x[lo]);
     }  
 
-    if (Pstream::master())
+    // -------------------------------------------------------------------------
+    // Variable Albedo path (untested): master-only since Fmatrix_ lives only
+    // on master. O(N) RHS: q[i] = Isol[i] - sum(qsExt).
+    // -------------------------------------------------------------------------
+    if (!constAlbedo_) //this is not tested - aytac
     {
-        // Variable Albedo
-        if (!constAlbedo_) //this is not tested - aytac
+        if (Pstream::master())
         {
             scalarSquareMatrix C(totalNCoarseFaces_, 0.0);
-
+            const scalar sumQsExt = sum(qsExt);
             for (label i=0; i<totalNCoarseFaces_; i++)
             {
+                scalar Isol =   skyViewCoeffGlobal_()[lo][i]
+                              + sunViewCoeffGlobal_()[lo][i];
+                q[i] = Isol - sumQsExt;
                 for (label j=0; j<totalNCoarseFaces_; j++)
                 {
-                    //scalar invEj = 1.0/E[j];
-                    scalar Isol = (skyViewCoeffGlobal_()[lo][j] + sunViewCoeffGlobal_()[lo][j]);
                     if (i==j)
-                    {
                         C(i, j) = (1/(1-A[j]))-(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                        q[i] += (- 1.0)*(-Isol) - qsExt[j];
-                    }
                     else
-                    {
                         C(i, j) = -(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                        q[i] += 0 - qsExt[j];
-                    }
-
                 }
             }
-
             Info<< "\nSolving view factor equations..." << endl;
-            // Negative coming into the fluid
             LUsolve(C, q);
         }
-        else //Constant albedo
+        // Broadcast q from master to all procs
+        Pstream::scatter(q);
+    }
+    else //Constant albedo
+    {
+        // -----------------------------------------------------------------------
+        // Iteration 0: build CLU_ on master, save to disk, then broadcast to all
+        // procs so every rank holds a valid LU decomposition for replicated solve.
+        // -----------------------------------------------------------------------
+        if (iterCounter_ == 0)
         {
-            // Initial iter calculates CLU and chaches it
-            if (iterCounter_ == 0)
+            if (Pstream::master())
             {
                 for (label i=0; i<totalNCoarseFaces_; i++)
                 {
                     for (label j=0; j<totalNCoarseFaces_; j++)
-                    { 
-                        //scalar invEj = 1/E[j];
+                    {
                         if (i==j)
-                        {
                             CLU_()(i, j) = (1/(1-A[j]))-(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                        }
                         else
-                        {
                             CLU_()(i, j) = -(A[j]/(1-A[j]))*Fmatrix_()(i, j);
-                        }
                     }
                 }
-                
+
                 fileName fileCLU
                 (
                    mesh_.time().rootPath()
                    /mesh_.time().globalCaseName()
                    /"processor0/CLU_qs"
-                ); //under processor0 to avoid keeping CLU file for future uses by mistake
-                // Check if file already exists
+                );
                 IFstream is(fileCLU);
                 label testCLU = -1;
                 if (is.good())
@@ -829,54 +831,51 @@ void Foam::solarLoad::directAndDiffuse::calculate()
                     else
                     {
                         testCLU = -1;
-                        Info << "Warning: File for decomposed C matrix does not match totalNCoarseFaces! Will decompose C matrix again..." << endl;
+                        Info << "Warning: File for decomposed C matrix does not match "
+                             << "totalNCoarseFaces! Will decompose C matrix again..."
+                             << endl;
                     }
-                }                
+                }
                 if (testCLU == -1)
-                {                                                                
+                {
                     Info<< "\nDecomposing C matrix..." << endl;
                     LUDecompose(CLU_(), pivotIndices_);
-                    
                     if (Pstream::nProcs() > 1)
                     {
-                        // Write file - only in parallel cases
                         OFstream os(fileCLU);
                         os << totalNCoarseFaces_ << endl;
                         os << CLU_() << endl;
                         os << pivotIndices_ << endl;
                     }
-                }                    
-            }
-            
-            for (label i=0; i<totalNCoarseFaces_; i++)
-            {
-                for (label j=0; j<totalNCoarseFaces_; j++)
-                {
-                    scalar Isol = (skyViewCoeffGlobal_()[lo][j]*(1-hi_fraction) + skyViewCoeffGlobal_()[hi][j]*(hi_fraction)
-                                 + sunViewCoeffGlobal_()[lo][j]*(1-hi_fraction) + sunViewCoeffGlobal_()[hi][j]*(hi_fraction));
-                    if (i==j)
-                    {
-                        q[i] += (- 1.0)*(-Isol) - qsExt[j];
-                    }
-                    else
-                    {
-                        q[i] += 0 - qsExt[j];
-                    }
                 }
             }
+            iterCounter_++;
+        }
 
+        // -----------------------------------------------------------------------
+        // Master: O(N) RHS assembly + LU backsubstitution. Then scatter q.
+        // Derivation: the original O(N^2) loop simplifies to
+        //   q[i] = Isol[i] - sum(qsExt)  for all i
+        // -----------------------------------------------------------------------
+        if (Pstream::master())
+        {
+            const scalar sumQsExt = sum(qsExt);
+            for (label i=0; i<totalNCoarseFaces_; i++)
+            {
+                scalar Isol =   skyViewCoeffGlobal_()[lo][i]*(1 - hi_fraction)
+                              + skyViewCoeffGlobal_()[hi][i]*hi_fraction
+                              + sunViewCoeffGlobal_()[lo][i]*(1 - hi_fraction)
+                              + sunViewCoeffGlobal_()[hi][i]*hi_fraction;
+                q[i] = Isol - sumQsExt;
+            }
             Info<< "\nLU Back substitute C matrix.." << endl;
             LUBacksubstitute(CLU_(), pivotIndices_, q);
-            iterCounter_ ++;
         }
+        // Broadcast q (size N) from master to all workers.
+        Pstream::scatter(q);
     }
 
-    // Scatter q and fill qs
-    Pstream::listCombineScatter(q);
-    Pstream::listCombineGather(q, maxEqOp<scalar>());
     
-    Pstream::listCombineScatter(A);
-    Pstream::listCombineGather(A, maxEqOp<scalar>());    
 
     label globCoarseId = 0;
     //label globFineId = 0;    
