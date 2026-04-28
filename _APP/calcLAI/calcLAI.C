@@ -63,6 +63,7 @@ Description
 
 #include "singleCellFvMesh.H"
 #include "interpolation.H"
+#include <climits>
 #include "IOdictionary.H"
 #include "fixedValueFvPatchFields.H"
 #include "wallFvPatch.H"
@@ -235,6 +236,19 @@ void interpfvMeshToCartesian
 
     dp = vector(minCellL,minCellL,minCellL); // grid spacing
 
+    // Check that vegetation was found (LAD > 0 somewhere)
+    // Use gMax(LAD) for a globally-correct check: even in parallel, a single
+    // rank may have no local LAD cells while other ranks do — pmin/pmax from
+    // calcVegBBOX are already globally reduced, but gMax is the safest guard.
+    if (gMax(LAD) <= 10*SMALL)
+    {
+        FatalError
+            << "calcVegBBOX: no vegetation found (LAD is zero everywhere).\n"
+            << "Check that the LAD field is properly initialised (run topoSet "
+            << "and setFields before calcLAI)."
+            << abort(FatalError);
+    }
+
     // Extend the cartesian grid to include vegetation
     pmin -= 5*dp;
     pmax += 5*dp;
@@ -243,6 +257,16 @@ void interpfvMeshToCartesian
     nx = ceil( (pmax.x()-pmin.x()) / dp.x()) + 1;
     ny = ceil( (pmax.y()-pmin.y()) / dp.y()) + 1;
     nz = ceil( (pmax.z()-pmin.z()) / dp.z()) + 1;
+
+    // Guard against int32 overflow in grid size
+    if (static_cast<int64_t>(nx)*ny*nz > static_cast<int64_t>(INT_MAX))
+    {
+        FatalError
+            << "Cartesian grid too large: " << nx << " x " << ny << " x " << nz
+            << " = " << static_cast<int64_t>(nx)*ny*nz << " cells > INT_MAX=" << INT_MAX << ".\n"
+            << "Increase minCellSizeFactor in vegetationProperties to coarsen the grid."
+            << abort(FatalError);
+    }
 
     // Generate cartesian interpolation grid
     // coordinates
@@ -296,7 +320,7 @@ void interpfvMeshToCartesian
     List<DynamicList<label>> pIndexDyn_(Pstream::nProcs());
     pIndexDyn_[Pstream::myProcNo()] = pIndexDyn;
     Pstream::gatherList(pIndexDyn_);
-    
+
     if (Pstream::master())
     {
         LADInterp.setSize(nx*ny*nz, pTraits<scalar>::zero);
@@ -309,7 +333,7 @@ void interpfvMeshToCartesian
                 LADInterp[pIndexLocal[i]] = LADInterpLocal[i];
             }
         }
-    }    
+    }
 
     //Pstream::scatter(LADInterp);
 
@@ -343,6 +367,16 @@ void interpcartesianToRotCartesian
     nyRot = ceil( (pmaxRot.y()-pminRot.y()) / dp.y()) + 1;
     nzRot = ceil( (pmaxRot.z()-pminRot.z()) / dp.z()) + 1;
 
+    // Guard against int32 overflow in rotated grid size
+    if (static_cast<int64_t>(nxRot)*nyRot*nzRot > static_cast<int64_t>(INT_MAX))
+    {
+        FatalError
+            << "Rotated Cartesian grid too large: " << nxRot << " x " << nyRot << " x " << nzRot
+            << " = " << static_cast<int64_t>(nxRot)*nyRot*nzRot << " cells > INT_MAX=" << INT_MAX << ".\n"
+            << "Increase minCellSizeFactor in vegetationProperties to coarsen the grid."
+            << abort(FatalError);
+    }
+
     ////////////////////////////////////////////////////////////////////
     // Interpolate onto rotated cartesian grid
     int pIndex;
@@ -353,7 +387,7 @@ void interpcartesianToRotCartesian
     {
         // Generate rotated cartesian interpolation grid coordinates
         LADInterpRot.setSize(nxRot*nyRot*nzRot, pTraits<scalar>::zero);
-        
+
         for (int k=0; k < nzRot; k++)
         {
           for (int j=0; j < nyRot; j++)
@@ -369,7 +403,7 @@ void interpcartesianToRotCartesian
               ptempRot.z() = pminRot.z() + k*dp.z();
 
               pmaxRot = max(pmaxRot, ptempRot);
-    
+
               // coordinate of point in original coordinate system
               ptemp = transform(Tinv, ptempRot);
 
@@ -472,7 +506,7 @@ int main(int argc, char *argv[])
     // Read sunPosVector list
     dictionary sunPosVectorIO;
     sunPosVectorIO.add(
-        "file", 
+        "file",
         fileName
         (
             mesh.time().constant()
@@ -504,7 +538,7 @@ int main(int argc, char *argv[])
     // Read solar radiation intensity flux
     dictionary IDNIO;
     IDNIO.add(
-        "file", 
+        "file",
         fileName
         (
             mesh.time().constant()
@@ -515,7 +549,7 @@ int main(int argc, char *argv[])
     (
         "IDN",
         IDNIO
-    ); 
+    );
     scalarField IDN_y = IDN.y();
 
     IOdictionary vegetationProperties
@@ -539,7 +573,7 @@ int main(int argc, char *argv[])
     Info << "Vertical vector : " << ez << endl;
 
     scalar kc = dimensioned<scalar>::lookupOrDefault("kc", coeffs, 0.5).value();
-    scalar minCellSizeFactor = dimensioned<scalar>::lookupOrDefault("minCellSizeFactor", coeffs, 10).value(); 
+    scalar minCellSizeFactor = dimensioned<scalar>::lookupOrDefault("minCellSizeFactor", coeffs, 10).value();
 
     ////////////////////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////
@@ -671,7 +705,7 @@ int main(int argc, char *argv[])
 
             scalarField LAIInterpRot;
             integrateLAD(LADInterpRot, nxRot, nyRot, nzRot, dp, LAIInterpRot);
-            
+
             // Info << "gMin(LAIInterpRot): " << gMin(LAIInterpRot) << endl;
             // Info << "gMax(LAIInterpRot): " << gMax(LAIInterpRot) << endl;
 
@@ -708,7 +742,7 @@ int main(int argc, char *argv[])
                         }
                     }
                 }
-            }         
+            }
 
             //calcDiv(qrswInterpRot, divqrswInterpRot, nx, ny, nz, dp);
             // Info << "divqrswInterpRot: " << gMax(divqrswInterpRot) << endl;
@@ -779,19 +813,19 @@ int main(int argc, char *argv[])
                     LAI[cellI] = 1000; // large enough to ensure qr = exp(-LAI*k)  \approx 0
                 }
             }
-            
+
             List<DynamicList<point>> ptempDyn_(Pstream::nProcs());
             ptempDyn_[Pstream::myProcNo()] = ptempDyn;
             Pstream::gatherList(ptempDyn_);
-            
+
             List<List<scalar>> LAI_(Pstream::nProcs());
             LAI_[Pstream::myProcNo()].setSize(ptempDyn.size(), 0.0);
             Pstream::gatherList(LAI_);
-            
+
             List<List<scalar>> divqrsw_(Pstream::nProcs());
             divqrsw_[Pstream::myProcNo()].setSize(ptempDyn.size(), 0.0);
-            Pstream::gatherList(divqrsw_);            
-            
+            Pstream::gatherList(divqrsw_);
+
             if (Pstream::master())
             {
                 for (label procI = 0; procI < Pstream::nProcs(); procI++)
@@ -817,7 +851,7 @@ int main(int argc, char *argv[])
                     divqrsw[cellI] = divqrsw_[Pstream::myProcNo()][i];
                 }
             }
-            
+
             ptempDyn.clear();
             ptempIndexDyn.clear();
             ptempDyn_.clear();
@@ -953,14 +987,14 @@ int main(int argc, char *argv[])
                     }
                 }
             }
-                       
+
             Pstream::listCombineScatter(LAI_);
             forAll (LAI_[Pstream::myProcNo()], i)
             {
                 label faceI = ptempIndexDyn[i];
                 kcLAIboundary[faceI] = LAI_[Pstream::myProcNo()][i];
             }
-            
+
             ////////////////////////////////////////////////////////////////////
             ////////////////////////////////////////////////////////////////////
             iter +=1;

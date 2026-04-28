@@ -84,8 +84,8 @@ void Foam::solarLoad::directAndDiffuse::initialise()
     Info << "wallPatchOrNot_: " << wallPatchOrNot_ << endl;
     Info << "nLocalWallCoarseFaces_: " << nLocalWallCoarseFaces_ << endl;
     
-    selectedPatches_.resize(count--);
-    wallPatchOrNot_.resize(count--);
+    selectedPatches_.resize(count);
+    wallPatchOrNot_.resize(count);
 
     Info<< "Selected patches:" << selectedPatches_ << endl;
     Info<< "Number of coarse faces:" << nLocalCoarseFaces_ << endl;
