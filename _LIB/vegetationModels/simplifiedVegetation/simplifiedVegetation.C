@@ -432,7 +432,8 @@ void Foam::vegetation::simplifiedVegetation::resistance(volScalarField& magU, vo
             else
                 rs_[cellI] = rsMin_.value();//((a1_.value() + mag(Rg_[cellI]))/(a2_.value() + mag(Rg_[cellI])))*(1.0 + a3_.value()*pow(VPD_[cellI]/1000.0-D0_.value(),2));
 */
-            scalar f1 = 7.119*exp(-0.05004*Rg_[cellI]) + 0.6174*exp(0.0006336*Rg_[cellI]);   
+            scalar RgBounded = max(min(Rg_[cellI], scalar(2000.0)), scalar(-2000.0));
+            scalar f1 = 7.119*exp(-0.05004*RgBounded) + 0.6174*exp(0.0006336*RgBounded);
             scalar f2 = 1;
             if(VPD_[cellI] < 0)
             {                   
@@ -499,13 +500,17 @@ void Foam::vegetation::simplifiedVegetation::calculate(volVectorField& U, volSca
                     Tl_[cellI];// = T[cellI];//*0. + 300.;//T[cellI];
 
                 // Calculate saturated density, specific humidity
-                rhosat_[cellI] = calc_rhosat(Tl_[cellI]);
-                evsat_[cellI] = calc_evsat(Tl_[cellI]);
-                qsat_[cellI] = 0.621945*(evsat_[cellI]/(p_-evsat_[cellI])); // ASHRAE 1, eq.23
+                // Bound Tl to stay below boiling point (373.15K at 1atm) to
+                // prevent calc_evsat returning > p_, which would cause div-by-0
+                // in the qsat formula. Physical Tl above ~340K is already extreme.
+                double TlSafe = min(Tl_[cellI], 370.0);
+                rhosat_[cellI] = calc_rhosat(TlSafe);
+                evsat_[cellI] = calc_evsat(TlSafe);
+                qsat_[cellI] = 0.621945*(evsat_[cellI]/max(p_-evsat_[cellI], scalar(1.0))); // ASHRAE 1, eq.23
 
                 // Calculate transpiration rate
                 //no transpiration at night when solar radiation is not >0
-             	E_[cellI] = pos(Rg_[cellI]-SMALL)*nEvapSides_.value()*LAD_[cellI]*rhoa_.value()*(qsat_[cellI]-q[cellI])/(ra_[cellI]+rs_[cellI]);
+             	E_[cellI] = pos(Rg_[cellI]-SMALL)*nEvapSides_.value()*LAD_[cellI]*rhoa_.value()*(qsat_[cellI]-q[cellI])/max(ra_[cellI]+rs_[cellI], VSMALL);
 
                 // Calculate latent heat flux
                 Qlat_[cellI] = lambda_.value()*E_[cellI];
@@ -544,7 +549,7 @@ void Foam::vegetation::simplifiedVegetation::calculate(volVectorField& U, volSca
 
         // Check rel. L-infinity error
         maxError = gMax(mag(new_Tl.primitiveField()-Tl_.primitiveField()));
-        maxRelError = maxError/gMax(mag(new_Tl.primitiveField()));
+        maxRelError = maxError/max(gMax(mag(new_Tl.primitiveField())), VSMALL);
 
         // update leaf temp.
         forAll(Tl_, cellI)
@@ -576,18 +581,19 @@ void Foam::vegetation::simplifiedVegetation::calculate(volVectorField& U, volSca
         if (LAD_[cellI] > 10*SMALL)
         {
             // Calculate saturated density, specific humidity
-            rhosat_[cellI] = calc_rhosat(Tl_[cellI]);
-            evsat_[cellI] = calc_evsat(Tl_[cellI]);
-            qsat_[cellI] = 0.621945*(evsat_[cellI]/(p_-evsat_[cellI])); // ASHRAE 1, eq.23
+            double TlSafe = min(Tl_[cellI], 370.0);
+            rhosat_[cellI] = calc_rhosat(TlSafe);
+            evsat_[cellI] = calc_evsat(TlSafe);
+            qsat_[cellI] = 0.621945*(evsat_[cellI]/max(p_-evsat_[cellI], scalar(1.0))); // ASHRAE 1, eq.23
 
             // Calculate transpiration rate
-            E_[cellI] = pos(Rg_[cellI]-SMALL)*nEvapSides_.value()*LAD_[cellI]*rhoa_.value()*(qsat_[cellI]-q[cellI])/(ra_[cellI]+rs_[cellI]); // todo: implement switch for double or single side
+            E_[cellI] = pos(Rg_[cellI]-SMALL)*nEvapSides_.value()*LAD_[cellI]*rhoa_.value()*(qsat_[cellI]-q[cellI])/max(ra_[cellI]+rs_[cellI], VSMALL);
 
             // Calculate latent heat flux
             Qlat_[cellI] = lambda_.value()*E_[cellI];
 
             // Calculate sensible heat flux
-            Qsen_[cellI] = 2.0*rhoa_.value()*cpa_.value()*LAD_[cellI]*(Tl_[cellI]-T[cellI])/ra_[cellI];
+            Qsen_[cellI] = 2.0*rhoa_.value()*cpa_.value()*LAD_[cellI]*(Tl_[cellI]-T[cellI])/max(ra_[cellI], VSMALL);
         }
     }
     rhosat_.correctBoundaryConditions();

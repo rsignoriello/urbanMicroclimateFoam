@@ -84,43 +84,43 @@ class directAndDiffuse
         volScalarField qs_;
 
         //- View factor matrix
-        autoPtr<scalarSquareMatrix> Fmatrix_;        
+        autoPtr<scalarSquareMatrix> Fmatrix_;
 
         //- Inverse of C matrix
         autoPtr<scalarSquareMatrix> CLU_;
-        
+
         //- solarLoadFineFaces_
         autoPtr<scalarListList> solarLoadFineFacesGlobal_;
-            
-        label solarLoadFineFacesSize;         
-        
+
+        label solarLoadFineFacesSize;
+
         //- skyViewCoeffGlobal_
         autoPtr<scalarListList> skyViewCoeffGlobal_;
 
-        label skyViewCoeffSize; 
-        
-        //- sunViewCoeffGlobal_
-        autoPtr<scalarListList> sunViewCoeffGlobal_;        
+        label skyViewCoeffSize;
 
-        label sunViewCoeffSize;    
+        //- sunViewCoeffGlobal_
+        autoPtr<scalarListList> sunViewCoeffGlobal_;
+
+        label sunViewCoeffSize;
 
         //- Selected patches
         labelList selectedPatches_;
 
         //- Selected patches
-        labelList wallPatchOrNot_;        
+        labelList wallPatchOrNot_;
 
         //- Total global coarse faces
         label totalNCoarseFaces_;
 
         //- Total local coarse faces
         label nLocalCoarseFaces_;
-        
+
         //- Total local wall coarse faces
         label nLocalWallCoarseFaces_;
-        
+
         //- Total local wall fine faces
-        label nLocalFineFaces_;        
+        label nLocalFineFaces_;
 
         //- Total global wall fine faces
         label totalNFineFaces_;
@@ -129,7 +129,7 @@ class directAndDiffuse
         bool constAlbedo_;
 
         //- timestepsInADay
-        label timestepsInADay_;         
+        label timestepsInADay_;
 
         //- Iterations Counter
         label iterCounter_;
@@ -163,7 +163,7 @@ class directAndDiffuse
             const scalarListList& viewFactors,
             scalarSquareMatrix& matrix
         );
-        
+
         void insertScalarListListElements
         (
             const globalIndex& index,
@@ -173,7 +173,7 @@ class directAndDiffuse
             const scalarListList& localCoeffs,
             scalarListList& globalCoeffs,
             const word& coarseOrFine
-        );                    
+        );
 
         //- Disallow default bitwise copy construct
         directAndDiffuse(const directAndDiffuse&);

@@ -5,3 +5,4 @@ set -x
 
 wmake solarRayTracingGen
 wmake calcLAI
+wmake viewFactorsGen

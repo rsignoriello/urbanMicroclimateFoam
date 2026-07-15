@@ -68,14 +68,14 @@ void Foam::solarLoad::directAndDiffuse::initialise()
         {
             selectedPatches_[count] = qsPatchI.patch().index();
             nLocalCoarseFaces_ += coarsePatches[patchI].size();
-            
+
             if ((isA<wallFvPatch>(mesh_.boundary()[patchI])))
             {
                 wallPatchOrNot_[count] = 1;
                 nLocalWallCoarseFaces_ += coarsePatches[patchI].size();
                 nLocalFineFaces_ += qsPatchI.patch().size();
-            }    
-            
+            }
+
             count++;
         }
     }
@@ -83,7 +83,7 @@ void Foam::solarLoad::directAndDiffuse::initialise()
     Info<< "Number of coarse faces:" << nLocalCoarseFaces_ << endl;
     Info << "wallPatchOrNot_: " << wallPatchOrNot_ << endl;
     Info << "nLocalWallCoarseFaces_: " << nLocalWallCoarseFaces_ << endl;
-    
+
     selectedPatches_.resize(count);
     wallPatchOrNot_.resize(count);
 
@@ -101,7 +101,7 @@ void Foam::solarLoad::directAndDiffuse::initialise()
     totalNCoarseFaces_ = nLocalCoarseFaces_;
     reduce(totalNCoarseFaces_, sumOp<label>());
     totalNFineFaces_ = nLocalFineFaces_;
-    reduce(totalNFineFaces_, sumOp<label>());    
+    reduce(totalNFineFaces_, sumOp<label>());
 
     if (Pstream::master())
     {
@@ -146,7 +146,7 @@ void Foam::solarLoad::directAndDiffuse::initialise()
             IOobject::NO_WRITE,
             false
         )
-    );    
+    );
 
     map_.reset
     (
@@ -170,7 +170,7 @@ void Foam::solarLoad::directAndDiffuse::initialise()
             false
         )
     );
-    
+
     scalarListIOList solarLoadFineFacesmyProc
     (
         IOobject
@@ -183,8 +183,8 @@ void Foam::solarLoad::directAndDiffuse::initialise()
             false
         )
     );
-    solarLoadFineFacesSize = solarLoadFineFacesmyProc.size();       
-    
+    solarLoadFineFacesSize = solarLoadFineFacesmyProc.size();
+
     scalarListIOList skyViewCoeffmyProc
     (
         IOobject
@@ -197,8 +197,8 @@ void Foam::solarLoad::directAndDiffuse::initialise()
             false
         )
     );
-    skyViewCoeffSize = skyViewCoeffmyProc.size();    
-    
+    skyViewCoeffSize = skyViewCoeffmyProc.size();
+
     scalarListIOList sunViewCoeffmyProc
     (
         IOobject
@@ -213,19 +213,6 @@ void Foam::solarLoad::directAndDiffuse::initialise()
     );
     sunViewCoeffSize = sunViewCoeffmyProc.size();
 
-    labelIOList sunskyMapmyProc
-    (
-        IOobject
-        (
-            "sunskyMap",
-            mesh_.facesInstance(),
-            mesh_,
-            IOobject::MUST_READ,
-            IOobject::NO_WRITE,
-            false
-        )
-    );    
-
     labelListIOList globalFaceFaces
     (
         IOobject
@@ -237,106 +224,25 @@ void Foam::solarLoad::directAndDiffuse::initialise()
             IOobject::NO_WRITE,
             false
         )
-    ); 
+    );
 
-    // Store local view factor data for the parallel Jacobi solver (before gatherList)
+    // Store local view factor data for the parallel Jacobi solver
     FmyProc_ = FmyProc;
     globalFaceFacesLocal_ = globalFaceFaces;
 
-    List<labelList> sunskyMap(Pstream::nProcs());
-    sunskyMap[Pstream::myProcNo()] = sunskyMapmyProc;
-    Pstream::gatherList(sunskyMap);
+    // Direct local assignment — each proc keeps only its own chunk.
+    // No gatherList needed: skyViewCoeff/sunViewCoeff/solarLoadFineFaces are
+    // per-face properties; calculate() only accesses local indices.
+    solarLoadFineFacesGlobal_.reset(new scalarListList(solarLoadFineFacesSize));
+    forAll(solarLoadFineFacesGlobal_(), lo)
+        solarLoadFineFacesGlobal_()[lo] = solarLoadFineFacesmyProc[lo];
 
-    List<labelListList> globalFaceFacesProc(Pstream::nProcs());
-    globalFaceFacesProc[Pstream::myProcNo()] = globalFaceFaces;
-    Pstream::gatherList(globalFaceFacesProc);
-
-    List<scalarListList> F(Pstream::nProcs());
-    F[Pstream::myProcNo()] = FmyProc;
-    Pstream::gatherList(F);
-    
-    List<scalarListList> solarLoadFineFaces(Pstream::nProcs());
-    solarLoadFineFaces[Pstream::myProcNo()] = solarLoadFineFacesmyProc;
-    Pstream::gatherList(solarLoadFineFaces);         
-    
-    List<scalarListList> skyViewCoeff(Pstream::nProcs());
-    skyViewCoeff[Pstream::myProcNo()] = skyViewCoeffmyProc;
-    Pstream::gatherList(skyViewCoeff);    
-    
-    List<scalarListList> sunViewCoeff(Pstream::nProcs());
-    sunViewCoeff[Pstream::myProcNo()] = sunViewCoeffmyProc;
-    Pstream::gatherList(sunViewCoeff);        
-
-    globalIndex globalNumbering(nLocalCoarseFaces_);
-    globalIndex globalNumberingFine(nLocalFineFaces_);
-
-    solarLoadFineFacesGlobal_.reset
-    (
-        new scalarListList(solarLoadFineFacesSize)
-    );    
-    forAll(solarLoadFineFacesGlobal_(), vectorId)
+    skyViewCoeffGlobal_.reset(new scalarListList(skyViewCoeffSize));
+    sunViewCoeffGlobal_.reset(new scalarListList(sunViewCoeffSize));
+    forAll(skyViewCoeffGlobal_(), lo)
     {
-        scalarList globalCoeffs(totalNFineFaces_, 0.0);   
-        solarLoadFineFacesGlobal_()[vectorId] = globalCoeffs;
-    }
-    for (label procI = 0; procI < Pstream::nProcs(); procI++)
-    {
-        insertScalarListListElements
-        (
-            globalNumberingFine,
-            procI,
-            sunskyMap,
-            globalFaceFacesProc[procI],
-            solarLoadFineFaces[procI],
-            solarLoadFineFacesGlobal_(),
-            "fine"
-        );
-    }
- 
-    skyViewCoeffGlobal_.reset
-    (
-        new scalarListList(sunViewCoeffSize)
-    );    
-    forAll(skyViewCoeffGlobal_(), vectorId)
-    {
-        scalarList globalCoeffs(totalNCoarseFaces_, 0.0);   
-        skyViewCoeffGlobal_()[vectorId] = globalCoeffs;
-    } 
-    for (label procI = 0; procI < Pstream::nProcs(); procI++)
-    {
-        insertScalarListListElements
-        (
-            globalNumbering,
-            procI,
-            sunskyMap,
-            globalFaceFacesProc[procI],
-            skyViewCoeff[procI],
-            skyViewCoeffGlobal_(),
-            "coarse"
-        );
-    }
-
-    sunViewCoeffGlobal_.reset
-    (
-        new scalarListList(sunViewCoeffSize)
-    );
-    forAll(sunViewCoeffGlobal_(), vectorId)
-    {
-        scalarList globalCoeffs(totalNCoarseFaces_, 0.0);   
-        sunViewCoeffGlobal_()[vectorId] = globalCoeffs;
-    }        
-    for (label procI = 0; procI < Pstream::nProcs(); procI++)
-    {
-        insertScalarListListElements
-        (
-            globalNumbering,
-            procI,
-            sunskyMap,
-            globalFaceFacesProc[procI],
-            sunViewCoeff[procI],
-            sunViewCoeffGlobal_(),
-            "coarse"
-        );          
+        skyViewCoeffGlobal_()[lo] = skyViewCoeffmyProc[lo];
+        sunViewCoeffGlobal_()[lo] = sunViewCoeffmyProc[lo];
     }
 
     // Apply optional view factor row normalization (smoothing) locally on each
@@ -413,14 +319,14 @@ Foam::solarLoad::directAndDiffuse::directAndDiffuse(const volScalarField& T)
     Fmatrix_(),
     CLU_(),
     solarLoadFineFacesGlobal_(),
-    skyViewCoeffGlobal_(),   
+    skyViewCoeffGlobal_(),
     sunViewCoeffGlobal_(),
     selectedPatches_(mesh_.boundary().size(), -1),
-    wallPatchOrNot_(mesh_.boundary().size(), 0),    
+    wallPatchOrNot_(mesh_.boundary().size(), 0),
     totalNCoarseFaces_(0),
     nLocalCoarseFaces_(0),
     nLocalWallCoarseFaces_(0),
-    nLocalFineFaces_(0),        
+    nLocalFineFaces_(0),
     totalNFineFaces_(0),
     constAlbedo_(false),
     timestepsInADay_(24),
@@ -482,15 +388,15 @@ Foam::solarLoad::directAndDiffuse::directAndDiffuse
     ),
     Fmatrix_(),
     CLU_(),
-    solarLoadFineFacesGlobal_(),    
+    solarLoadFineFacesGlobal_(),
     skyViewCoeffGlobal_(),
     sunViewCoeffGlobal_(),
     selectedPatches_(mesh_.boundary().size(), -1),
-    wallPatchOrNot_(mesh_.boundary().size(), 0),    
+    wallPatchOrNot_(mesh_.boundary().size(), 0),
     totalNCoarseFaces_(0),
     nLocalCoarseFaces_(0),
     nLocalWallCoarseFaces_(0),
-    nLocalFineFaces_(0),        
+    nLocalFineFaces_(0),
     totalNFineFaces_(0),
     constAlbedo_(false),
     timestepsInADay_(24),
@@ -564,11 +470,11 @@ void Foam::solarLoad::directAndDiffuse::insertScalarListListElements
     forAll(localCoeffs, vectorId)
     {
         const scalarList& vf = localCoeffs[vectorId];
-        
+
         forAll(vf, faceI)
         {
             if (coarseOrFine == "coarse")
-            {               
+            {
                 globalCoeffs[vectorId][sunskyMap[procI][faceI]] = vf[faceI];
             }
             else
@@ -576,7 +482,7 @@ void Foam::solarLoad::directAndDiffuse::insertScalarListListElements
                 label globalI = globalNumbering.toGlobal(procI, faceI);
                 globalCoeffs[vectorId][globalI] = vf[faceI];
             }
-        }        
+        }
     }
 }
 
@@ -589,7 +495,6 @@ void Foam::solarLoad::directAndDiffuse::calculate()
     scalarField compactCoarseHo(map_->constructSize(), 0.0);
 
     globalIndex globalNumbering(nLocalCoarseFaces_);
-    globalIndex globalNumberingFine(nLocalFineFaces_);    
 
     // Fill local averaged Albedo(A) and external heatFlux(Ho)
     DynamicList<scalar> localCoarseAave(nLocalCoarseFaces_);
@@ -615,8 +520,8 @@ void Foam::solarLoad::directAndDiffuse::calculate()
 
         const scalarList& Hoi = qsp.qso();
 
-        const polyPatch& pp = coarseMesh_.boundaryMesh()[patchID]; 
-        const labelList& coarsePatchFace = coarseMesh_.patchFaceMap()[patchID]; 
+        const polyPatch& pp = coarseMesh_.boundaryMesh()[patchID];
+        const labelList& coarsePatchFace = coarseMesh_.patchFaceMap()[patchID];
 
         scalarList Aave(pp.size(), 0.0);
         scalarList Hoiave(Aave.size(), 0.0);
@@ -696,11 +601,11 @@ void Foam::solarLoad::directAndDiffuse::calculate()
     Pstream::listCombineScatter(A);
     Pstream::listCombineScatter(qsExt);
 
-    Time& time = const_cast<Time&>(mesh_.time());   
+    Time& time = const_cast<Time&>(mesh_.time());
     // Read sunPosVector list
     dictionary sunPosVectorIO;
     sunPosVectorIO.add(
-        "file", 
+        "file",
         fileName
         (
             mesh_.time().constant()
@@ -711,7 +616,7 @@ void Foam::solarLoad::directAndDiffuse::calculate()
     (
         "sunPosVector",
         sunPosVectorIO
-    );           
+    );
     // look for the correct range
     label lo = 0;
     label hi = 0;
@@ -726,13 +631,13 @@ void Foam::solarLoad::directAndDiffuse::calculate()
         {
             hi = i;
             break;
-        }   
+        }
     }
-    scalar hi_fraction = 0; 
+    scalar hi_fraction = 0;
     if (lo != hi) //if timestep is between two time values in sunPosVector
     {
         hi_fraction = (time.value() - sunPosVector_x[lo]) / (sunPosVector_x[hi] - sunPosVector_x[lo]);
-    }  
+    }
 
     // -------------------------------------------------------------------------
     // Parallel Jacobi solver for: C*q = b
@@ -758,10 +663,10 @@ void Foam::solarLoad::directAndDiffuse::calculate()
         const label globalI = globalStart + localI;
 
         // Interpolated solar irradiance for this face and timestep
-        scalar Isol =   skyViewCoeffGlobal_()[lo][globalI]*(1 - hi_fraction)
-                      + skyViewCoeffGlobal_()[hi][globalI]*hi_fraction
-                      + sunViewCoeffGlobal_()[lo][globalI]*(1 - hi_fraction)
-                      + sunViewCoeffGlobal_()[hi][globalI]*hi_fraction;
+        scalar Isol =   skyViewCoeffGlobal_()[lo][localI]*(1 - hi_fraction)
+                      + skyViewCoeffGlobal_()[hi][localI]*hi_fraction
+                      + sunViewCoeffGlobal_()[lo][localI]*(1 - hi_fraction)
+                      + sunViewCoeffGlobal_()[hi][localI]*hi_fraction;
         b_local[localI] = Isol - sumQsExt;
 
         // Diagonal of C: 1/(1-A_i) - A_i/(1-A_i)*F(i,i)
@@ -825,10 +730,10 @@ void Foam::solarLoad::directAndDiffuse::calculate()
     Info<< "\nJacobi solver: " << iter << " iterations, residual = "
         << residual << endl;
 
-    
+
 
     label globCoarseId = 0;
-    //label globFineId = 0;    
+    //label globFineId = 0;
     label fineFaceNo = 0;
     forAll(selectedPatches_, i)
     {
@@ -860,10 +765,8 @@ void Foam::solarLoad::directAndDiffuse::calculate()
                     qsp[faceI] = q[globalCoarse];
                     if (isA<wallFvPatch>(mesh_.boundary()[patchID]))
                     {
-                        label globalFine =
-                            globalNumberingFine.toGlobal(Pstream::myProcNo(), fineFaceNo+faceI);   
-                        qsp[faceI] -= (sunViewCoeffGlobal_()[lo][globalCoarse]*(1-hi_fraction) + sunViewCoeffGlobal_()[hi][globalCoarse]*(hi_fraction)) * (1-A[globalCoarse]);
-                        qsp[faceI] += (solarLoadFineFacesGlobal_()[lo][globalFine]*(1-hi_fraction) + solarLoadFineFacesGlobal_()[hi][globalFine]*(hi_fraction)) * (1-A[globalCoarse]);
+                        qsp[faceI] -= (sunViewCoeffGlobal_()[lo][globCoarseId]*(1-hi_fraction) + sunViewCoeffGlobal_()[hi][globCoarseId]*(hi_fraction)) * (1-A[globalCoarse]);
+                        qsp[faceI] += (solarLoadFineFacesGlobal_()[lo][fineFaceNo+faceI]*(1-hi_fraction) + solarLoadFineFacesGlobal_()[hi][fineFaceNo+faceI]*(hi_fraction)) * (1-A[globalCoarse]);
                     }
                     heatFlux += qsp[faceI]*sf[faceI];
                 }
@@ -926,7 +829,7 @@ Foam::solarLoad::directAndDiffuse::Ru() const
 {
     return tmp<volScalarField::Internal>
     (
-        new volScalarField::Internal 
+        new volScalarField::Internal
         (
             IOobject
             (

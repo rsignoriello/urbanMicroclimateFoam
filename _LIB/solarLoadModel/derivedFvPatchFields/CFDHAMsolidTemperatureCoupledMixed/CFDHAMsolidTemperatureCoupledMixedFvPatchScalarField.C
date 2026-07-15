@@ -463,6 +463,9 @@ void CFDHAMsolidTemperatureCoupledMixedFvPatchScalarField::updateCoeffs()
         }
     }         
 
+    if (qrNbr.size() != Tp.size()) qrNbr.setSize(Tp.size(), 0.0);
+    if (qsNbr.size() != Tp.size()) qsNbr.setSize(Tp.size(), 0.0);
+
     if(fieldpc.type() == "compressible::CFDHAMsolidMoistureCoupledImpermeable")
     {
         valueFraction() = 0;

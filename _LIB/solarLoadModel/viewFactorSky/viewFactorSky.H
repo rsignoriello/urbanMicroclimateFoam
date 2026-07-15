@@ -51,7 +51,6 @@ SourceFiles
 
 #include "radiationModel.H"
 #include "singleCellFvMesh.H"
-#include "scalarMatrices.H"
 #include "globalIndex.H"
 #include "scalarListIOList.H"
 #include "mapDistribute.H"
@@ -87,11 +86,9 @@ class viewFactorSky
         //- Net radiative heat flux [W/m^2]
         volScalarField qr_;
 
-        //- View factor matrix
-        autoPtr<scalarSquareMatrix> Fmatrix_;
-
-        //- Inverse of C matrix
-        autoPtr<scalarSquareMatrix> CLU_;
+        //- Sparse view factor matrix (master only): per-row column indices and values
+        labelListList FsparseCols_;
+        scalarListList FsparseVals_;
 
         //- Selected patches
         labelList selectedPatches_;
@@ -102,15 +99,17 @@ class viewFactorSky
         //- Total local coarse faces
         label nLocalCoarseFaces_;
 
-        //- Constant emissivity
-        bool constEmissivity_;
+        //- Global index of the first local row (= globalNumbering.toGlobal(myProc,0))
+        label globalOffset_;
 
-        //- Iterations Counter
-        label iterCounter_;
+        //- GMRES solver parameters
+        label gmresRestart_;
+        label gmresMaxIter_;
+        scalar gmresTol_;
 
-        //- Pivot Indices for LU decomposition
-        labelList pivotIndices_;
-        
+        //- Previous solution for warm-start across time steps
+        scalarField qPrev_;
+
         //- List of grass patches
         hashedWordList grassPatches;
 
@@ -120,15 +119,22 @@ class viewFactorSky
         //- Initialise
         void initialise();
 
-        //- Insert view factors into main matrix
-        void insertMatrixElements
+        //- Sparse matrix-vector product: w = C*x
+        //  C(i,j) = delta_ij/E_j - (1/E_j-1)*F_ij
+        scalarField matvecC
         (
-            const globalIndex& index,
-            const label fromProci,
-            const labelListList& globalFaceFaces,
-            const scalarListList& viewFactors,
-            scalarSquareMatrix& matrix
-        );
+            const scalarField& x,
+            const scalarField& E
+        ) const;
+
+        //- Restarted GMRES(gmresRestart_) solver for C*x = b
+        //  x is in/out (warm start); returns final absolute residual norm
+        scalar solveGMRES
+        (
+            const scalarField& b,
+            scalarField& x,
+            const scalarField& E
+        ) const;
 
 
 public:
