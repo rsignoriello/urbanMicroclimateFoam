@@ -709,7 +709,7 @@ void Foam::solarLoad::directAndDiffuse::calculate()
         }
 
         // AllGather: each proc contributed only its chunk; sum = allgather
-        Pstream::listCombineGather(q_new, sumOp<scalar>());
+        Pstream::listCombineGather(q_new, plusEqOp<scalar>());  // sumOp non modifica il primo argomento: la raccolta non sommava nulla
         Pstream::listCombineScatter(q_new);
 
         // Convergence check on local chunk (max absolute change)

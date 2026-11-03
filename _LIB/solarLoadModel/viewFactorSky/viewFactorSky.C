@@ -387,7 +387,7 @@ Foam::scalarField Foam::radiationModels::viewFactorSky::matvecC
     }
 
     // AllGather: each proc filled only its chunk (rest is 0), sum assembles full w
-    Pstream::listCombineGather(w, sumOp<scalar>());
+    Pstream::listCombineGather(w, plusEqOp<scalar>());  // sumOp non modifica il primo argomento: la raccolta non sommava nulla
     Pstream::listCombineScatter(w);
 
     return w;
@@ -774,7 +774,7 @@ void Foam::radiationModels::viewFactorSky::calculate()
             b[globalI] += vals[k]*sigma*T4[cols[k]];
         }
     }
-    Pstream::listCombineGather(b, sumOp<scalar>());
+    Pstream::listCombineGather(b, plusEqOp<scalar>());
     Pstream::listCombineScatter(b);
 
     // Distributed GMRES: all procs participate, warm-start from previous solution
@@ -806,6 +806,20 @@ void Foam::radiationModels::viewFactorSky::calculate()
             const labelList& coarsePatchFace =
                 coarseMesh_.patchFaceMap()[patchID];
 
+            // Correzione per faccia fine (come per l'onda corta): il sistema usa per la coarse la media
+            // pesata per area di T^4, quindi una faccia fine piu' calda della sua coarse non emetteva
+            // l'eccesso (parete a 423 K con qr -3 W/m2). Con irradiazione uniforme sulla coarse:
+            // q_fine = q_coarse - eps*sigma*(Tf^4 - <T^4>). La somma pesata per area delle correzioni e' 0.
+            const bool fineCorr =
+                isA<wallFvPatch>(mesh_.boundary()[patchID])
+             && !grassPatches.found(mesh_.boundary()[patchID].name());
+            const scalarField& Tp = T_.boundaryField()[patchID];
+            const scalarList eb =
+                refCast<greyDiffusiveViewFactorFixedValueFvPatchScalarField>
+                (
+                    qrBf[patchID]
+                ).emissivity();
+
             scalar heatFlux = 0.0;
             forAll(coarseToFine, coarseI)
             {
@@ -813,11 +827,28 @@ void Foam::radiationModels::viewFactorSky::calculate()
                     globalNumbering.toGlobal(Pstream::myProcNo(), globCoarseId);
                 const label coarseFaceID = coarsePatchFace[coarseI];
                 const labelList& fineFaces = coarseToFine[coarseFaceID];
+
+                scalar T4c = 0;
+                if (fineCorr)
+                {
+                    scalar area = 0;
+                    forAll(fineFaces, k)
+                    {
+                        T4c += pow4(Tp[fineFaces[k]])*sf[fineFaces[k]];
+                        area += sf[fineFaces[k]];
+                    }
+                    T4c /= max(area, vSmall);
+                }
+
                 forAll(fineFaces, k)
                 {
                     label facei = fineFaces[k];
 
                     qrp[facei] = q[globalCoarse];
+                    if (fineCorr)
+                    {
+                        qrp[facei] -= eb[facei]*sigma*(pow4(Tp[facei]) - T4c);
+                    }
                     heatFlux += qrp[facei]*sf[facei];
                 }
                 globCoarseId ++;
