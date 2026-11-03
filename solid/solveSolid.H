@@ -90,8 +90,9 @@
             ///////////////////////////////
         }                
 
-        if (timeStepDecrease == false) 
+        if (timeStepDecrease == false)
         {
+            #include "diagHotCells.H"  // DIAGNOSI TEMPORANEA P10, attiva solo con diagHotCellsT > 0
             #include "solidContinuityErrs.H"
 
             solidInternalTime += runTime.deltaT().value();

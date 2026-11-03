@@ -55,3 +55,19 @@ rho_m.correctBoundaryConditions();
 cap_m.correctBoundaryConditions();
 lambda_m.correctBoundaryConditions();
 K_pt.correctBoundaryConditions();
+
+// Sulle facce dove pc non scambia umidita' (impermeabile o zeroGradient) i BC di Ts impongono il flusso
+// con la sola lambda_m: K_pt deve essere nullo anche li', altrimenti TsEqn aggiunge calore latente
+// L_v*K_pt*snGrad(Ts) e pcEqn fa entrare acqua K_pt*snGrad(Ts) che dal bordo non arrivano
+forAll(K_pt.boundaryField(), patchi)
+{
+    const word& pcType = pc.boundaryField()[patchi].type();
+    if
+    (
+        pcType == "compressible::CFDHAMsolidMoistureCoupledImpermeable"
+     || pcType == "zeroGradient"
+    )
+    {
+        K_pt.boundaryFieldRef()[patchi] == 0;
+    }
+}

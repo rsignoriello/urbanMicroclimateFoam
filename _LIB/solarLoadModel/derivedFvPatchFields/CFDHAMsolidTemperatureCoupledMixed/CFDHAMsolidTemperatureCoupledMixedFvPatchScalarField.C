@@ -218,7 +218,19 @@ void CFDHAMsolidTemperatureCoupledMixedFvPatchScalarField::updateCoeffs()
     scalarField lambda_m(Tp.size(), 0.0);
         lambda_m = patch().lookupPatchField<volScalarField, scalar>("lambda_m");                               
 
-    scalarField deltaCoeff_ = nbrPatch.deltaCoeffs();
+    // deltaCoeffs di parete = 1/(n & d): nelle celle d'aria quasi tangenti alla
+    // parete (prismi alla base degli edifici) esplode e, con il flusso esplicito
+    // in refGrad, le iterazioni di Picard divergono. Distanza normale limitata
+    // ad almeno 0.1*|Cf - Cn| (non-ortogonalita' max ~84 gradi).
+    scalarField deltaCoeff_
+    (
+        1.0
+       /max
+        (
+            1.0/nbrPatch.deltaCoeffs(),
+            0.1*mag(nbrPatch.Cf() - nbrPatch.Cn())
+        )
+    );
         mpp.distribute(deltaCoeff_);
     scalarField alphatNbr = nbrPatch.lookupPatchField<volScalarField, scalar>("alphat");
         mpp.distribute(alphatNbr);
@@ -468,9 +480,34 @@ void CFDHAMsolidTemperatureCoupledMixedFvPatchScalarField::updateCoeffs()
 
     if(fieldpc.type() == "compressible::CFDHAMsolidMoistureCoupledImpermeable")
     {
-        valueFraction() = 0;
-        refValue() = 0;
-        refGrad() = (q_conv + qrNbr + qsNbr)/(lambda_m);
+        // Convezione implicita (Robin): kd*(Tp - Tc) = h*(Taria - Tp) + qr + qs, con kd = lambda*deltaCoeffs
+        // del solido. Con il flusso esplicito h*(Taria - Tp_old) le iterazioni di Picard si amplificano di
+        // h*Z per iterazione (Z = risposta della superficie al flusso nel sotto-passo): con h oltre ~50 W/(m2 K),
+        // colonne sottili e passi lunghi divergevano (rifiuti a ogni inizio d'ora, deltaT del solido ~80 s).
+        const scalarField hc((muair/Pr + alphatNbr)*cp*deltaCoeff_);
+        const scalarField kd(lambda_m*patch().deltaCoeffs());
+        valueFraction() = hc/(hc + kd);
+        refValue() = TcNbr;
+        refGrad() = (qrNbr + qsNbr)/(lambda_m);
+
+        // DIAGNOSI TEMPORANEA P10: flussi sulle facce piu' calde di diagHotCellsT (controlDict, 0 = spento)
+        const scalar diagT =
+            db().time().controlDict().lookupOrDefault<scalar>("diagHotCellsT", 0);
+        if (diagT > 0)
+        {
+            forAll(Tp, i)
+            {
+                if (Tp[i] > diagT)
+                {
+                    Pout<< "diagBC t " << db().time().value() << " faccia " << i
+                        << " Cf " << patch().Cf()[i] << " Tp " << Tp[i]
+                        << " Tcella " << patchInternalField()()[i] << " Taria " << TcNbr[i]
+                        << " q_conv " << q_conv[i] << " qr " << qrNbr[i] << " qs " << qsNbr[i]
+                        << " deltaCoeff " << deltaCoeff_[i] << " alphat " << alphatNbr[i]
+                        << " lambda " << lambda_m[i] << endl;
+                }
+            }
+        }
     }
     else
     {
