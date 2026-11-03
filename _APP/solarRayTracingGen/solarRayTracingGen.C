@@ -856,6 +856,24 @@ int main(int argc, char *argv[])
                     }
                 }
                 
+                // Sole della coarse = media pesata per area dei valori fini. La formula sopra divide per l'area
+                // della coarse, |somma vettoriale delle aree fini|: sulle coarse piegate e' molto minore della somma
+                // delle aree e la frazione illuminata superava 1 (fino a 168), con flussi fino a 1.3e5 W/m2
+                {
+                    scalar sumA = 0;
+                    scalar sumQA = 0;
+                    forAll(fineFaces, k)
+                    {
+                        const scalar Ak = mesh.magSf().boundaryField()[patchIDall][fineFaces[k]];
+                        sumA += Ak;
+                        sumQA += solarLoadFineFaces[vectorId][fineFaceNo+fineFaces[k]]*Ak;
+                    }
+                    if (sumA > VSMALL)
+                    {
+                        sunViewCoeff[vectorId][faceNoAll] = sumQA/sumA;
+                    }
+                }
+
                 cosPhi = (localCoarseSf[faceNo] & skyPos)/(mag(localCoarseSf[faceNo])*mag(skyPos) + SMALL);
                 radAngleBetween = Foam::acos( min(max(cosPhi, -1), 1) );
                 degAngleBetween = radToDeg(radAngleBetween);
